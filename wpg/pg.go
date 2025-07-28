@@ -53,11 +53,20 @@ func quote(s string) string {
 
 type Table struct {
 	Name    string   `json:"name"`
+	Schema  string   `json:"schema"`
 	Columns []Column `json:"columns"`
 
 	DisableUnique bool       `json:"disable_unique"`
 	Unique        [][]string `json:"unique"`
 	Index         [][]string `json:"index"`
+}
+
+// QualifiedName returns the table name with schema prefix if schema is specified
+func (t Table) QualifiedName() string {
+	if t.Schema != "" {
+		return fmt.Sprintf("%s.%s", t.Schema, t.Name)
+	}
+	return t.Name
 }
 
 func (t Table) DDL() []string {
@@ -66,7 +75,14 @@ func (t Table) DDL() []string {
 	}
 	var res []string
 
-	createTable := fmt.Sprintf("create table if not exists %s(", t.Name)
+	// Create schema if specified
+	if t.Schema != "" {
+		res = append(res, fmt.Sprintf("create schema if not exists %s", t.Schema))
+	}
+
+	tableName := t.QualifiedName()
+
+	createTable := fmt.Sprintf("create table if not exists %s(", tableName)
 	for i, col := range t.Columns {
 		createTable += fmt.Sprintf("%s %s", quote(col.Name), col.Type)
 		if i+1 == len(t.Columns) {
@@ -81,7 +97,7 @@ func (t Table) DDL() []string {
 		createIndex := fmt.Sprintf(
 			"create unique index if not exists u_%s on %s (",
 			t.Name,
-			t.Name,
+			tableName,
 		)
 		for i, cname := range cols {
 			createIndex += quote(cname)
@@ -105,7 +121,7 @@ func (t Table) DDL() []string {
 		createIndex := fmt.Sprintf(
 			"create index if not exists shovel_%s on %s (",
 			indexName,
-			t.Name,
+			tableName,
 		)
 		for i, cname := range cols {
 			createIndex += quote(cname)
@@ -124,22 +140,22 @@ func (t Table) DDL() []string {
 func (t Table) Migrate(ctx context.Context, pg Conn) error {
 	for _, stmt := range t.DDL() {
 		if _, err := pg.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("table %q stmt %q: %w", t.Name, stmt, err)
+			return fmt.Errorf("table %q stmt %q: %w", t.QualifiedName(), stmt, err)
 		}
 	}
-	diff, err := Diff(ctx, pg, t.Name, t.Columns)
+	diff, err := Diff(ctx, pg, t.Name, t.Columns, t.Schema)
 	if err != nil {
-		return fmt.Errorf("getting diff for %s: %w", t.Name, err)
+		return fmt.Errorf("getting diff for %s: %w", t.QualifiedName(), err)
 	}
 	for _, c := range diff.Add {
 		var q = fmt.Sprintf(
 			"alter table %s add column if not exists %s %s",
-			t.Name,
+			t.QualifiedName(),
 			quote(c.Name),
 			c.Type,
 		)
 		if _, err := pg.Exec(ctx, q); err != nil {
-			return fmt.Errorf("adding column %s/%s: %w", t.Name, c.Name, err)
+			return fmt.Errorf("adding column %s/%s: %w", t.QualifiedName(), c.Name, err)
 		}
 	}
 	return nil
@@ -155,14 +171,19 @@ func Diff(
 	pg Conn,
 	tableName string,
 	cols []Column,
+	schema string,
 ) (DiffDetails, error) {
+	// Default to public schema if not specified
+	if schema == "" {
+		schema = "public"
+	}
 	const q = `
 		select column_name, data_type
 		from information_schema.columns
-		where table_schema = 'public'
-		and table_name = $1
+		where table_schema = $1
+		and table_name = $2
 	`
-	rows, _ := pg.Query(ctx, q, tableName)
+	rows, _ := pg.Query(ctx, q, schema, tableName)
 	indb, err := pgx.CollectRows(rows, pgx.RowToStructByName[Column])
 	if err != nil {
 		return DiffDetails{}, fmt.Errorf("querying for table info: %w", err)

@@ -33,6 +33,7 @@ export type IndexStatment = string[];
 
 export type Table = {
   name: string;
+  schema?: string;
   columns: Column[];
   index?: IndexStatment[];
 };

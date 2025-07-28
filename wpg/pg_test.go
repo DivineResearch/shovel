@@ -41,6 +41,22 @@ func TestDDL(t *testing.T) {
 				"create index if not exists shovel_a_asc_b_desc on foo (a asc, b desc)",
 			},
 		},
+		{
+			Table{
+				Name:   "bar",
+				Schema: "custom",
+				Columns: []Column{
+					{Name: "id", Type: "int"},
+					{Name: "data", Type: "text"},
+				},
+				Unique: [][]string{{"id"}},
+			},
+			[]string{
+				"create schema if not exists custom",
+				"create table if not exists custom.bar(id int, data text)",
+				"create unique index if not exists u_bar on custom.bar (id)",
+			},
+		},
 	}
 	for _, tc := range cases {
 		diff.Test(t, t.Errorf, tc.table.DDL(), tc.want)
@@ -73,12 +89,12 @@ func TestMigrate(t *testing.T) {
 
 	for _, tc := range cases {
 		tc.old.Migrate(ctx, pg)
-		before, err := Diff(ctx, pg, tc.new.Name, tc.new.Columns)
+		before, err := Diff(ctx, pg, tc.new.Name, tc.new.Columns, tc.new.Schema)
 		diff.Test(t, t.Fatalf, nil, err)
 		diff.Test(t, t.Fatalf, tc.before, before)
 
 		tc.new.Migrate(ctx, pg)
-		after, err := Diff(ctx, pg, tc.new.Name, tc.new.Columns)
+		after, err := Diff(ctx, pg, tc.new.Name, tc.new.Columns, tc.new.Schema)
 		diff.Test(t, t.Fatalf, nil, err)
 		diff.Test(t, t.Fatalf, tc.after, after)
 
@@ -138,7 +154,7 @@ func TestDiff(t *testing.T) {
 
 	for _, tc := range cases {
 		diff.Test(t, t.Fatalf, nil, tc.table.Migrate(ctx, pg))
-		got, err := Diff(context.Background(), pg, tc.table.Name, tc.input)
+		got, err := Diff(context.Background(), pg, tc.table.Name, tc.input, tc.table.Schema)
 		diff.Test(t, t.Errorf, nil, err)
 		diff.Test(t, t.Errorf, tc.want, got)
 		_, err = pg.Exec(ctx, "drop schema public cascade; create schema public;")

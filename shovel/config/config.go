@@ -56,11 +56,13 @@ func DDL(conf Root) []string {
 	var tables = map[string]wpg.Table{}
 	for i := range conf.Integrations {
 		nt := conf.Integrations[i].Table
-		et, exists := tables[nt.Name]
+		// Use qualified name as key to properly group tables by schema
+		key := nt.QualifiedName()
+		et, exists := tables[key]
 		if exists {
 			nt = union(nt, et)
 		}
-		tables[nt.Name] = nt
+		tables[key] = nt
 	}
 	var res []string
 	for _, t := range tables {
@@ -139,7 +141,9 @@ func ValidateFilterRefs(conf *Root) error {
 			if err := colexists(table, ref.Column); err != nil {
 				return false, fmt.Errorf("filter_ref depends on %q: %w", ref.Column, err)
 			}
-			ref.Table = table
+			// Set the qualified table name for the reference
+			igTable := igs[ref.Integration].Table
+			ref.Table = igTable.QualifiedName()
 			return true, nil
 		case len(ref.Table) > 0 || len(ref.Column) > 0:
 			return false, fmt.Errorf("filter_ref requires integration field")

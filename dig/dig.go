@@ -404,6 +404,8 @@ func (f Filter) Accept(ctx context.Context, pgmut *sync.Mutex, pg wpg.Conn, d an
 		case strings.HasSuffix(f.Op, "contains"):
 			switch {
 			case len(f.Ref.Table) > 0:
+				// The table reference in filter_ref should already be fully qualified
+				// with schema if needed (set during ValidateFilterRefs)
 				q := fmt.Sprintf(
 					`select true from %s where %s = $1`,
 					f.Ref.Table,
@@ -776,7 +778,7 @@ func (ig Integration) Delete(ctx context.Context, pg wpg.Conn, n uint64) error {
 		and block_num >= $3
 	`
 	_, err := pg.Exec(ctx,
-		fmt.Sprintf(q, ig.Table.Name),
+		fmt.Sprintf(q, ig.Table.QualifiedName()),
 		wctx.SrcName(ctx),
 		ig.name,
 		n,
@@ -826,9 +828,15 @@ func (ig Integration) Insert(ctx context.Context, pgmut *sync.Mutex, pg wpg.Conn
 	pgmut.Lock()
 	defer pgmut.Unlock()
 
+	// Build identifier with schema if specified
+	identifier := pgx.Identifier{ig.Table.Name}
+	if ig.Table.Schema != "" {
+		identifier = pgx.Identifier{ig.Table.Schema, ig.Table.Name}
+	}
+	
 	nr, err := pg.CopyFrom(
 		ctx,
-		pgx.Identifier{ig.Table.Name},
+		identifier,
 		ig.Columns,
 		pgx.CopyFromRows(rows),
 	)

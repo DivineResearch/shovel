@@ -149,6 +149,17 @@ export type Source = {
    * url is added to urls
    */
   urls: string[];
+  /**
+   * Optional URL for backfilling operations.
+   * Used when the indexer is more than 1000 blocks behind.
+   */
+  backfill_url?: string;
+  /**
+   * Optional URLs for backfilling operations.
+   * Shovel will round-robin requests to these urls during backfilling.
+   * backfill_url is added to backfill_urls
+   */
+  backfill_urls?: string[];
   chain_id: EnvRef | number;
   poll_duration?: EnvRef | string;
   concurrency?: EnvRef | number;

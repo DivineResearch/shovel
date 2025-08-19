@@ -339,6 +339,7 @@ type Source struct {
 	Name         string
 	ChainID      uint64
 	URLs         []string
+	BackfillURLs []string
 	WSURL        string
 	Start        uint64
 	Stop         uint64
@@ -353,6 +354,8 @@ func (s *Source) UnmarshalJSON(d []byte) error {
 		ChainID      wos.EnvUint64   `json:"chain_id"`
 		URL          wos.EnvString   `json:"url"`
 		URLs         []wos.EnvString `json:"urls"`
+		BackfillURL  wos.EnvString   `json:"backfill_url"`
+		BackfillURLs []wos.EnvString `json:"backfill_urls"`
 		WSURL        wos.EnvString   `json:"ws_url"`
 		Start        wos.EnvUint64   `json:"start"`
 		Stop         wos.EnvUint64   `json:"stop"`
@@ -382,6 +385,19 @@ func (s *Source) UnmarshalJSON(d []byte) error {
 			continue
 		}
 		s.URLs = append(s.URLs, u)
+	}
+
+	var backfillURLs []string
+	backfillURLs = append(backfillURLs, string(x.BackfillURL))
+	for _, url := range x.BackfillURLs {
+		backfillURLs = append(backfillURLs, string(url))
+	}
+
+	for _, u := range backfillURLs {
+		if len(u) == 0 {
+			continue
+		}
+		s.BackfillURLs = append(s.BackfillURLs, u)
 	}
 
 	s.PollDuration = time.Second

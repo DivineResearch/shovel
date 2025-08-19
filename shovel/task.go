@@ -70,6 +70,12 @@ func WithSource(src Source) Option {
 	}
 }
 
+func WithBackfillSource(src Source) Option {
+	return func(t *Task) {
+		t.backfillSrc = src
+	}
+}
+
 func WithIntegrationFactory(f func(config.Integration) (Destination, error)) Option {
 	return func(t *Task) {
 		t.destFactory = f
@@ -180,13 +186,24 @@ type Task struct {
 
 	filter glf.Filter
 
-	src        Source
-	srcName    string
-	srcChainID uint64
+	src            Source
+	backfillSrc    Source
+	srcName        string
+	srcChainID     uint64
 
 	dests       []Destination
 	destFactory func(config.Integration) (Destination, error)
 	destConfig  config.Integration
+}
+
+// getSource returns the appropriate source (regular or backfill) based on how far behind we are
+func (t *Task) getSource(blocksBehind uint64) Source {
+	const backfillThreshold = 1000
+	// Use backfill source if we have one and we're more than 1000 blocks behind
+	if t.backfillSrc != nil && blocksBehind > backfillThreshold {
+		return t.backfillSrc
+	}
+	return t.src
 }
 
 func (t *Task) update(
@@ -344,13 +361,10 @@ var (
 // in no side-effects.
 func (task *Task) Converge() error {
 	var (
-		ctx     = task.ctx
-		t0      = time.Now()
-		nextURL = task.src.NextURL()
-		url     = nextURL.String()
-		nrpc    = uint64(0)
+		ctx  = task.ctx
+		t0   = time.Now()
+		nrpc = uint64(0)
 	)
-	ctx = wctx.WithSrcHost(ctx, nextURL.Hostname())
 	ctx = wctx.WithCounter(ctx, &nrpc)
 
 	pgtx, err := task.pgp.Begin(ctx)
@@ -367,10 +381,33 @@ func (task *Task) Converge() error {
 		if task.stop > 0 && localNum >= task.stop {
 			return ErrDone
 		}
-		gethNum, gethHash, err := task.src.Latest(ctx, url, localNum)
+		
+		// First get the latest from regular source to determine how far behind we are
+		regularURL := task.src.NextURL()
+		gethNum, gethHash, err := task.src.Latest(ctx, regularURL.String(), localNum)
 		if err != nil {
 			return fmt.Errorf("getting latest from eth: %w", err)
 		}
+		
+		// Determine which source to use based on how far behind we are
+		blocksBehind := uint64(0)
+		if gethNum > localNum {
+			blocksBehind = gethNum - localNum
+		}
+		activeSource := task.getSource(blocksBehind)
+		
+		// Log when using backfill source
+		if task.backfillSrc != nil && blocksBehind > 1000 {
+			slog.InfoContext(ctx, "using backfill source",
+				"blocks_behind", blocksBehind,
+				"local_num", localNum,
+				"target_num", gethNum,
+			)
+		}
+		
+		activeURL := activeSource.NextURL()
+		url := activeURL.String()
+		ctx = wctx.WithSrcHost(ctx, activeURL.Hostname())
 		var (
 			targetNum  uint64
 			targetHash []byte
@@ -413,7 +450,7 @@ func (task *Task) Converge() error {
 			return ErrNothingNew
 		}
 		ctx = wctx.WithNumLimit(ctx, localNum+1, delta)
-		blocks, err := task.load(ctx, url, localHash, localNum+1, delta)
+		blocks, err := task.load(ctx, activeSource, url, localHash, localNum+1, delta)
 		if errors.Is(err, ErrReorg) {
 			slog.ErrorContext(ctx, "reorg",
 				"n", localNum,
@@ -464,6 +501,7 @@ func (task *Task) Converge() error {
 
 func (t *Task) load(
 	ctx context.Context,
+	src Source,
 	url string,
 	localHash []byte,
 	start, limit uint64,
@@ -485,7 +523,7 @@ func (t *Task) load(
 		}
 		eg.Go(func() error {
 			ctx = wctx.WithNumLimit(ctx, m, n)
-			b, err := t.src.Get(ctx, url, &t.filter, m, n)
+			b, err := src.Get(ctx, url, &t.filter, m, n)
 			if err != nil {
 				slog.ErrorContext(ctx, "loading blocks", "error", err)
 				return fmt.Errorf("loading blocks: %w", err)
@@ -785,11 +823,20 @@ func loadTasks(ctx context.Context, pgp *pgxpool.Pool, c config.Root) ([]*Task, 
 		return nil, fmt.Errorf("loading source configs: %w", err)
 	}
 	var sources = map[string]Source{}
+	var backfillSources = map[string]Source{}
 	for _, sc := range scByName {
 		sources[sc.Name] = jrpc2.New(sc.URLs...).
 			WithWSURL(sc.WSURL).
 			WithPollDuration(sc.PollDuration).
 			WithMaxReads(len(allIntegrations))
+		
+		// Create backfill source if backfill URLs are provided
+		if len(sc.BackfillURLs) > 0 {
+			backfillSources[sc.Name] = jrpc2.New(sc.BackfillURLs...).
+				WithWSURL(sc.WSURL).
+				WithPollDuration(sc.PollDuration).
+				WithMaxReads(len(allIntegrations))
+		}
 	}
 	var tasks []*Task
 	for _, ig := range allIntegrations {
@@ -808,7 +855,8 @@ func loadTasks(ctx context.Context, pgp *pgxpool.Pool, c config.Root) ([]*Task, 
 			if !ok {
 				return nil, fmt.Errorf("finding source for %s", scRef.Name)
 			}
-			task, err := NewTask(
+			
+			opts := []Option{
 				WithContext(ctx),
 				WithPG(pgp),
 				WithRange(scRef.Start, scRef.Stop),
@@ -818,7 +866,14 @@ func loadTasks(ctx context.Context, pgp *pgxpool.Pool, c config.Root) ([]*Task, 
 				WithChainID(sc.ChainID),
 				WithSource(src),
 				WithIntegration(ig),
-			)
+			}
+			
+			// Add backfill source if available
+			if backfillSrc, ok := backfillSources[scRef.Name]; ok {
+				opts = append(opts, WithBackfillSource(backfillSrc))
+			}
+			
+			task, err := NewTask(opts...)
 			if err != nil {
 				return nil, fmt.Errorf("setting up main task: %w", err)
 			}
